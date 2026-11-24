@@ -2,9 +2,9 @@
 
 ## Versions
 
-- PostgreSQL 18.6
-- Python 3.13.9
-- SQLAlchemy 2.1.9, psycopg2-binary 2.9.13 (requirements.txt)
+- PostgreSQL 18.6 (local), PostgreSQL 18.7 on Neon (deployed)
+- Python 3.13.9 (Part 2), Python 3.12 (web app, locally and on Render)
+- SQLAlchemy 2.1.9, psycopg2-binary 2.9.13, FastAPI 0.165.0, uvicorn 0.54.0 (requirements.txt)
 
 ## Files
 
@@ -12,6 +12,8 @@
 - `sql/seed.sql` - deletes all rows and inserts the sample data
 - `sql/verify_rules.sql` - checks the business rules on the data, all numbers should be 0
 - `part2_queries.py` - Part 2, runs tasks 1 to 8 with SQLAlchemy
+- `main.py` - Part 3, the FastAPI web app
+- `db.py` - creates the SQLAlchemy engine from DATABASE_URL, used by main.py
 - `requirements.txt`
 
 ## Database setup and restore
@@ -92,7 +94,7 @@ We never turn off foreign keys.
 ## Required checks (done in the web app, Part 3)
 
 1. No self review. Before saving a review we check the reviewer is not an author of the paper. When the authors of a paper change we check none of the new authors already reviewed it.
-2. Session assignment. A paper in a session must be accepted (also checked by the database), and its track and the session must be in the same conference. If the status changes from accepted, or the track changes to another conference, the session is removed.
+2. Session assignment. A paper in a session must be accepted (also checked by the database), and its track and the session must be in the same conference. If a change breaks this (status not accepted, track in another conference, or a session moved to another conference while it has papers) it is rejected with 409.
 
 ## Other business rules
 
@@ -121,7 +123,7 @@ verify_rules.sql checks all of them, on our data all are 0.
 - Phone number is required.
 
 ## Changes from Assignment 1
- We used Azamat's assignment 1, but made some changes according to feedback recieved from professor (score was 92.5/100)
+ We used Azamat's assignment 1, but made some changes according to feedback received from professor (score was 92.5/100)
 - Paper Version: version_no is the partial key, key is (paper_id, version_no). HAS_VERSION is 1:N with total participation of Paper Version. Removed the current version attribute (it is derived).
 - Status and recommendation values were drawn as attributes, now they are CHECK constraints.
 - Exactly one corresponding author was missing in UML, now it is enforced as above.
@@ -200,3 +202,40 @@ Running all tasks recreates the tables and data first (tasks 1 and 2).
 ```
 pg_dump -U postgres --no-owner --no-privileges OmarData > OmarData_dump.sql
 ```
+
+---
+
+# Part 3
+
+## Web application
+
+- URL: https://dbpa3.onrender.com (API docs at /docs)
+- FastAPI app in `main.py`, uses SQLAlchemy. Database is PostgreSQL on Neon, hosted on Render free plan.
+- The free plan sleeps after 15 minutes, so the first request can take about a minute.
+- The Neon database was created with schema.sql and seed.sql (same as Part 1).
+
+## Run locally
+
+```
+pip install -r requirements.txt
+export DATABASE_URL='postgresql+psycopg2://USER:PASS@HOST/DB'
+uvicorn main:app --reload
+```
+
+## What it does
+
+- CRUD for users, papers, sessions and reviews.
+- Author and reviewer info is managed with the user. Authors, keywords and versions are managed with the paper.
+- Paper versions have their own endpoints under /papers/{paper_id}/versions.
+- Conferences, tracks, pools and labels come from the seed data and are read only.
+- Every write runs in one transaction (`engine.begin()`), so if a check fails nothing is saved.
+- Failed checks and duplicate values return 409, missing rows return 404, wrong input (like no corresponding author) returns 422.
+
+## Demo of the checks
+
+| Request | Result |
+|---|---|
+| POST /reviews, paper 1, reviewer 1 | 409, Arman is an author of paper 1 |
+| PUT /papers/4 with session 4 | 409, track is in CONF-A, session is in CONF-B |
+| PUT /papers/2 adding author 1 | 409, Arman already reviewed paper 2 |
+| PUT /papers/1 with status rejected and session 1 | 409, only accepted papers can be in a session |
