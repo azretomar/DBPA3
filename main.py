@@ -147,7 +147,9 @@ def delete_user(user_id: int):
     except IntegrityError as e:
         raise db_error(e)
     return {"deleted_user_id": user_id}
-    from datetime import date, datetime
+
+
+from datetime import date, datetime, time
 from typing import Literal
 from pydantic import Field
 
