@@ -1,0 +1,617 @@
+SQLAlchemy 2.1.9 | PostgreSQL 18.7 (3190d2f) | Python 3.12.16
+
+===========================================================================
+1. Create tables
+===========================================================================
+running sql/schema.sql
+
+-- tables and constraints
+SELECT c.relname AS table_name,
+       COUNT(*) FILTER (WHERE con.contype = 'p') AS pk,
+       COUNT(*) FILTER (WHERE con.contype = 'f') AS fk,
+       COUNT(*) FILTER (WHERE con.contype = 'u') AS uniq,
+       COUNT(*) FILTER (WHERE con.contype = 'c') AS checks
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_constraint con ON con.conrelid = c.oid
+WHERE n.nspname = 'public' AND c.relkind = 'r'
+GROUP BY c.relname
+ORDER BY c.relname
+
+table_name           | pk | fk | uniq | checks
+---------------------+----+----+------+-------
+app_user             | 1  | 0  | 1    | 1     
+author               | 1  | 1  | 1    | 1     
+author_research_area | 1  | 1  | 0    | 0     
+conference           | 1  | 0  | 1    | 2     
+conference_host      | 1  | 1  | 0    | 0     
+conference_reviewer  | 1  | 2  | 0    | 0     
+conference_session   | 1  | 3  | 0    | 1     
+paper                | 1  | 2  | 0    | 2     
+paper_author         | 1  | 2  | 1    | 1     
+paper_keyword        | 1  | 1  | 0    | 0     
+paper_version        | 1  | 1  | 0    | 1     
+review               | 1  | 2  | 1    | 2     
+reviewer             | 1  | 1  | 0    | 1     
+reviewer_expertise   | 1  | 1  | 0    | 0     
+track                | 1  | 3  | 1    | 0     
+(15 rows)
+
+-- check constraints
+SELECT CAST(conrelid AS regclass) AS table_name, conname, pg_get_constraintdef(oid) AS definition
+FROM pg_constraint
+WHERE contype = 'c' AND connamespace = CAST('public' AS regnamespace)
+ORDER BY 1, 2
+
+table_name         | conname                   | definition                                                                                                                                                                                                       
+-------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+app_user           | chk_user_email            | CHECK (((email)::text ~ '^[^@ ]+@[^@ ]+$'::text))                                                                                                                                                                
+author             | chk_orcid                 | CHECK ((orcid ~ '^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$'::text))                                                                                                                                            
+reviewer           | chk_experience            | CHECK ((years_experience >= 0))                                                                                                                                                                                  
+conference         | chk_conf_dates            | CHECK ((end_date >= start_date))                                                                                                                                                                                 
+conference         | chk_conf_deadlines        | CHECK ((review_deadline >= submission_deadline))                                                                                                                                                                 
+conference_session | chk_session_times         | CHECK ((end_time > start_time))                                                                                                                                                                                  
+paper              | chk_paper_status          | CHECK (((status)::text = ANY ((ARRAY['submitted'::character varying, 'under review'::character varying, 'accepted'::character varying, 'rejected'::character varying, 'withdrawn'::character varying])::text[])))
+paper              | chk_session_only_accepted | CHECK (((session_id IS NULL) OR ((status)::text = 'accepted'::text)))                                                                                                                                            
+paper_author       | chk_author_position       | CHECK ((author_position > 0))                                                                                                                                                                                    
+paper_version      | chk_version_no            | CHECK ((version_no > 0))                                                                                                                                                                                         
+review             | chk_recommendation        | CHECK (((recommendation)::text = ANY ((ARRAY['accept'::character varying, 'reject'::character varying])::text[])))                                                                                               
+review             | chk_score                 | CHECK (((overall_score >= 1) AND (overall_score <= 5)))                                                                                                                                                          
+(12 rows)
+
+-- one corresponding author per paper
+SELECT indexname, indexdef FROM pg_indexes
+WHERE schemaname = 'public' AND indexname = 'uq_one_corresponding_author'
+
+indexname                   | indexdef                                                                                                            
+----------------------------+---------------------------------------------------------------------------------------------------------------------
+uq_one_corresponding_author | CREATE UNIQUE INDEX uq_one_corresponding_author ON public.paper_author USING btree (paper_id) WHERE is_corresponding
+(1 rows)
+
+===========================================================================
+2. Insert data
+===========================================================================
+running sql/seed.sql
+
+-- row count of every table
+SELECT 'app_user' AS table_name, COUNT(*) AS rows FROM app_user
+UNION ALL
+SELECT 'author' AS table_name, COUNT(*) AS rows FROM author
+UNION ALL
+SELECT 'author_research_area' AS table_name, COUNT(*) AS rows FROM author_research_area
+UNION ALL
+SELECT 'reviewer' AS table_name, COUNT(*) AS rows FROM reviewer
+UNION ALL
+SELECT 'reviewer_expertise' AS table_name, COUNT(*) AS rows FROM reviewer_expertise
+UNION ALL
+SELECT 'conference' AS table_name, COUNT(*) AS rows FROM conference
+UNION ALL
+SELECT 'conference_host' AS table_name, COUNT(*) AS rows FROM conference_host
+UNION ALL
+SELECT 'conference_reviewer' AS table_name, COUNT(*) AS rows FROM conference_reviewer
+UNION ALL
+SELECT 'track' AS table_name, COUNT(*) AS rows FROM track
+UNION ALL
+SELECT 'conference_session' AS table_name, COUNT(*) AS rows FROM conference_session
+UNION ALL
+SELECT 'paper' AS table_name, COUNT(*) AS rows FROM paper
+UNION ALL
+SELECT 'paper_keyword' AS table_name, COUNT(*) AS rows FROM paper_keyword
+UNION ALL
+SELECT 'paper_author' AS table_name, COUNT(*) AS rows FROM paper_author
+UNION ALL
+SELECT 'paper_version' AS table_name, COUNT(*) AS rows FROM paper_version
+UNION ALL
+SELECT 'review' AS table_name, COUNT(*) AS rows FROM review
+
+table_name           | rows
+---------------------+-----
+app_user             | 14  
+author               | 9   
+author_research_area | 16  
+reviewer             | 9   
+reviewer_expertise   | 17  
+conference           | 3   
+conference_host      | 5   
+conference_reviewer  | 14  
+track                | 6   
+conference_session   | 5   
+paper                | 13  
+paper_keyword        | 28  
+paper_author         | 26  
+paper_version        | 18  
+review               | 20  
+(15 rows)
+
+===========================================================================
+3.1 Update phone number of Arman Armanov
+===========================================================================
+
+-- before
+SELECT user_id, given_name, surname, email, phone_number FROM app_user WHERE email = :email
+params: {'email': 'arman.armanov@example.com'}
+
+user_id | given_name | surname | email                     | phone_number
+--------+------------+---------+---------------------------+-------------
+1       | Arman      | Armanov | arman.armanov@example.com | +77010000001
+(1 rows)
+
+-- update
+UPDATE app_user SET phone_number = :phone WHERE email = :email
+params: {'phone': '+77773414141', 'email': 'arman.armanov@example.com'}
+
+rows affected: 1
+
+-- after
+SELECT user_id, given_name, surname, email, phone_number FROM app_user WHERE email = :email
+params: {'email': 'arman.armanov@example.com'}
+
+user_id | given_name | surname | email                     | phone_number
+--------+------------+---------+---------------------------+-------------
+1       | Arman      | Armanov | arman.armanov@example.com | +77773414141
+(1 rows)
+
+rolled back
+
+===========================================================================
+3.2 Extend review deadlines (Astana +7 days, others +3 days)
+===========================================================================
+
+-- before
+SELECT conference_id, acronym, city, review_deadline FROM conference ORDER BY conference_id
+
+conference_id | acronym | city     | review_deadline
+--------------+---------+----------+----------------
+1             | CONF-A  | Astana   | 2026-11-01     
+2             | CONF-B  | Almaty   | 2026-11-10     
+3             | CONF-C  | Tashkent | 2027-02-15     
+(3 rows)
+
+-- update
+UPDATE conference
+SET review_deadline = review_deadline + CASE WHEN city = :city THEN :days1 ELSE :days2 END
+params: {'city': 'Astana', 'days1': 7, 'days2': 3}
+
+rows affected: 3
+
+-- after
+SELECT conference_id, acronym, city, review_deadline FROM conference ORDER BY conference_id
+
+conference_id | acronym | city     | review_deadline
+--------------+---------+----------+----------------
+1             | CONF-A  | Astana   | 2026-11-08     
+2             | CONF-B  | Almaty   | 2026-11-13     
+3             | CONF-C  | Tashkent | 2027-02-18     
+(3 rows)
+
+rolled back
+
+===========================================================================
+4.1 Delete withdrawn papers where Amina Aminova is corresponding author
+===========================================================================
+
+-- before: papers of Amina
+SELECT p.paper_id, p.title, p.status, pa.is_corresponding
+FROM paper p
+JOIN paper_author pa ON pa.paper_id = p.paper_id
+JOIN app_user u ON u.user_id = pa.author_id
+WHERE u.email = :email
+ORDER BY p.paper_id
+params: {'email': 'amina.aminova@example.com'}
+
+paper_id | title    | status    | is_corresponding
+---------+----------+-----------+-----------------
+7        | Paper 7  | withdrawn | True            
+8        | Paper 8  | withdrawn | True            
+9        | Paper 9  | accepted  | False           
+12       | Paper 12 | withdrawn | False           
+(4 rows)
+
+-- before: papers that will be deleted and their rows
+SELECT p.paper_id,
+       (SELECT COUNT(*) FROM paper_author x WHERE x.paper_id = p.paper_id) AS authors,
+       (SELECT COUNT(*) FROM paper_keyword x WHERE x.paper_id = p.paper_id) AS keywords,
+       (SELECT COUNT(*) FROM paper_version x WHERE x.paper_id = p.paper_id) AS versions,
+       (SELECT COUNT(*) FROM review x WHERE x.paper_id = p.paper_id) AS reviews
+FROM paper p
+WHERE p.status = :status
+  AND EXISTS (SELECT 1 FROM paper_author pa JOIN app_user u ON u.user_id = pa.author_id
+              WHERE pa.paper_id = p.paper_id AND pa.is_corresponding AND u.email = :email)
+ORDER BY p.paper_id
+params: {'email': 'amina.aminova@example.com', 'status': 'withdrawn'}
+
+paper_id | authors | keywords | versions | reviews
+---------+---------+----------+----------+--------
+7        | 2       | 2        | 2        | 2      
+8        | 2       | 3        | 1        | 1      
+(2 rows)
+
+-- before: counts
+SELECT (SELECT COUNT(*) FROM app_user) AS users,
+       (SELECT COUNT(*) FROM conference) AS conferences,
+       (SELECT COUNT(*) FROM track) AS tracks,
+       (SELECT COUNT(*) FROM paper) AS papers,
+       (SELECT COUNT(*) FROM paper_author) AS paper_authors,
+       (SELECT COUNT(*) FROM paper_keyword) AS keywords,
+       (SELECT COUNT(*) FROM paper_version) AS versions,
+       (SELECT COUNT(*) FROM review) AS reviews
+
+users | conferences | tracks | papers | paper_authors | keywords | versions | reviews
+------+-------------+--------+--------+---------------+----------+----------+--------
+14    | 3           | 6      | 13     | 26            | 28       | 18       | 20     
+(1 rows)
+
+-- delete (authors, keywords, versions, reviews are deleted by ON DELETE CASCADE)
+DELETE FROM paper p
+WHERE p.status = :status
+  AND EXISTS (SELECT 1 FROM paper_author pa JOIN app_user u ON u.user_id = pa.author_id
+              WHERE pa.paper_id = p.paper_id AND pa.is_corresponding AND u.email = :email)
+RETURNING p.paper_id, p.title
+params: {'email': 'amina.aminova@example.com', 'status': 'withdrawn'}
+
+paper_id | title  
+---------+--------
+7        | Paper 7
+8        | Paper 8
+(2 rows)
+
+-- after: papers of Amina
+SELECT p.paper_id, p.title, p.status, pa.is_corresponding
+FROM paper p
+JOIN paper_author pa ON pa.paper_id = p.paper_id
+JOIN app_user u ON u.user_id = pa.author_id
+WHERE u.email = :email
+ORDER BY p.paper_id
+params: {'email': 'amina.aminova@example.com'}
+
+paper_id | title    | status    | is_corresponding
+---------+----------+-----------+-----------------
+9        | Paper 9  | accepted  | False           
+12       | Paper 12 | withdrawn | False           
+(2 rows)
+
+-- after: counts
+SELECT (SELECT COUNT(*) FROM app_user) AS users,
+       (SELECT COUNT(*) FROM conference) AS conferences,
+       (SELECT COUNT(*) FROM track) AS tracks,
+       (SELECT COUNT(*) FROM paper) AS papers,
+       (SELECT COUNT(*) FROM paper_author) AS paper_authors,
+       (SELECT COUNT(*) FROM paper_keyword) AS keywords,
+       (SELECT COUNT(*) FROM paper_version) AS versions,
+       (SELECT COUNT(*) FROM review) AS reviews
+
+users | conferences | tracks | papers | paper_authors | keywords | versions | reviews
+------+-------------+--------+--------+---------------+----------+----------+--------
+14    | 3           | 6      | 11     | 22            | 23       | 15       | 17     
+(1 rows)
+
+rolled back
+
+===========================================================================
+4.2 Delete empty sessions of conferences in Astana
+===========================================================================
+
+-- before
+SELECT s.session_id, s.title, c.acronym, c.city, COUNT(p.paper_id) AS papers
+FROM conference_session s
+JOIN conference c ON c.conference_id = s.conference_id
+LEFT JOIN paper p ON p.session_id = s.session_id
+GROUP BY s.session_id, s.title, c.acronym, c.city
+ORDER BY s.session_id
+
+session_id | title     | acronym | city   | papers
+-----------+-----------+---------+--------+-------
+1          | Session 1 | CONF-A  | Astana | 2     
+2          | Session 2 | CONF-A  | Astana | 1     
+3          | Session 3 | CONF-A  | Astana | 0     
+4          | Session 4 | CONF-B  | Almaty | 1     
+5          | Session 5 | CONF-B  | Almaty | 0     
+(5 rows)
+
+-- delete
+DELETE FROM conference_session s
+USING conference c
+WHERE c.conference_id = s.conference_id
+  AND c.city = :city
+  AND NOT EXISTS (SELECT 1 FROM paper p WHERE p.session_id = s.session_id)
+RETURNING s.session_id, s.title
+params: {'city': 'Astana'}
+
+session_id | title    
+-----------+----------
+3          | Session 3
+(1 rows)
+
+-- after
+SELECT s.session_id, s.title, c.acronym, c.city, COUNT(p.paper_id) AS papers
+FROM conference_session s
+JOIN conference c ON c.conference_id = s.conference_id
+LEFT JOIN paper p ON p.session_id = s.session_id
+GROUP BY s.session_id, s.title, c.acronym, c.city
+ORDER BY s.session_id
+
+session_id | title     | acronym | city   | papers
+-----------+-----------+---------+--------+-------
+1          | Session 1 | CONF-A  | Astana | 2     
+2          | Session 2 | CONF-A  | Astana | 1     
+4          | Session 4 | CONF-B  | Almaty | 1     
+5          | Session 5 | CONF-B  | Almaty | 0     
+(4 rows)
+
+-- after: conferences
+SELECT conference_id, acronym, city FROM conference ORDER BY conference_id
+
+conference_id | acronym | city    
+--------------+---------+---------
+1             | CONF-A  | Astana  
+2             | CONF-B  | Almaty  
+3             | CONF-C  | Tashkent
+(3 rows)
+
+rolled back
+
+===========================================================================
+5.1 Accepted papers
+===========================================================================
+
+SELECT p.paper_id, p.title,
+       u.given_name || ' ' || u.surname AS corresponding_author,
+       u.email,
+       t.name AS track,
+       c.conference_id,
+       c.acronym
+FROM paper p
+JOIN track t ON t.track_id = p.track_id
+JOIN conference c ON c.conference_id = t.conference_id
+JOIN paper_author pa ON pa.paper_id = p.paper_id AND pa.is_corresponding
+JOIN app_user u ON u.user_id = pa.author_id
+WHERE p.status = :status
+ORDER BY p.paper_id
+params: {'status': 'accepted'}
+
+paper_id | title   | corresponding_author | email                     | track   | conference_id | acronym
+---------+---------+----------------------+---------------------------+---------+---------------+--------
+1        | Paper 1 | Arman Armanov        | arman.armanov@example.com | Track 1 | 1             | CONF-A 
+2        | Paper 2 | Person 8             | person8@example.com       | Track 1 | 1             | CONF-A 
+3        | Paper 3 | Person 11            | person11@example.com      | Track 2 | 1             | CONF-A 
+4        | Paper 4 | Person 7             | person7@example.com       | Track 2 | 1             | CONF-A 
+9        | Paper 9 | Person 6             | person6@example.com       | Track 4 | 2             | CONF-B 
+(5 rows)
+
+===========================================================================
+5.2 Abstract contains 'machine learning'
+===========================================================================
+
+SELECT paper_id, title FROM paper
+WHERE abstract ILIKE '%' || :phrase || '%'
+ORDER BY paper_id
+params: {'phrase': 'machine learning'}
+
+paper_id | title  
+---------+--------
+2        | Paper 2
+5        | Paper 5
+8        | Paper 8
+9        | Paper 9
+(4 rows)
+
+===========================================================================
+5.3 Versions of a paper
+===========================================================================
+
+SELECT version_no, file_location, uploaded_at
+FROM paper_version
+WHERE paper_id = :paper_id
+ORDER BY version_no DESC
+params: {'paper_id': 1}
+
+version_no | file_location       | uploaded_at        
+-----------+---------------------+--------------------
+3          | files/paper1_v3.pdf | 2026-11-20 09:05:00
+2          | files/paper1_v2.pdf | 2026-09-03 11:15:00
+1          | files/paper1_v1.pdf | 2026-08-20 18:42:00
+(3 rows)
+
+===========================================================================
+5.4 Reviewers in pool with Databases expertise and 3+ years
+===========================================================================
+
+SELECT u.user_id, u.given_name || ' ' || u.surname AS full_name, u.email
+FROM conference_reviewer cr
+JOIN reviewer r ON r.reviewer_id = cr.reviewer_id
+JOIN app_user u ON u.user_id = r.reviewer_id
+WHERE cr.conference_id = :conf
+  AND r.years_experience >= :years
+  AND EXISTS (SELECT 1 FROM reviewer_expertise e
+              WHERE e.reviewer_id = r.reviewer_id AND e.area_label = :area)
+ORDER BY u.user_id
+params: {'conf': 1, 'years': 3, 'area': 'Databases'}
+
+user_id | full_name     | email                    
+--------+---------------+--------------------------
+1       | Arman Armanov | arman.armanov@example.com
+4       | Person 4      | person4@example.com      
+9       | Person 9      | person9@example.com      
+(3 rows)
+
+===========================================================================
+6.1 Papers and authors per track
+===========================================================================
+
+SELECT t.track_id, t.name, t.conference_id,
+       COUNT(DISTINCT p.paper_id) AS papers,
+       COUNT(DISTINCT pa.author_id) AS authors
+FROM track t
+LEFT JOIN paper p ON p.track_id = t.track_id
+LEFT JOIN paper_author pa ON pa.paper_id = p.paper_id
+GROUP BY t.track_id, t.name, t.conference_id
+ORDER BY t.track_id
+
+track_id | name    | conference_id | papers | authors
+---------+---------+---------------+--------+--------
+1        | Track 1 | 1             | 4      | 5      
+2        | Track 2 | 1             | 3      | 5      
+3        | Track 3 | 1             | 0      | 0      
+4        | Track 4 | 2             | 3      | 6      
+5        | Track 5 | 2             | 3      | 4      
+6        | Track 6 | 3             | 0      | 0      
+(6 rows)
+
+===========================================================================
+6.2 Reviews per reviewer
+===========================================================================
+
+SELECT r.reviewer_id, u.given_name || ' ' || u.surname AS full_name,
+       COUNT(rv.review_id) AS reviews,
+       ROUND(AVG(rv.overall_score), 2) AS avg_score
+FROM reviewer r
+JOIN app_user u ON u.user_id = r.reviewer_id
+LEFT JOIN review rv ON rv.reviewer_id = r.reviewer_id
+GROUP BY r.reviewer_id, u.given_name, u.surname
+ORDER BY r.reviewer_id
+
+reviewer_id | full_name     | reviews | avg_score
+------------+---------------+---------+----------
+1           | Arman Armanov | 3       | 4.00     
+3           | Person 3      | 3       | 3.00     
+4           | Person 4      | 5       | 3.40     
+5           | Person 5      | 3       | 3.00     
+6           | Person 6      | 2       | 2.50     
+9           | Person 9      | 1       | 3.00     
+10          | Person 10     | 2       | 3.50     
+12          | Person 12     | 1       | 3.00     
+13          | Person 13     | 0       | NULL     
+(9 rows)
+
+===========================================================================
+6.3 Papers and average score per conference
+===========================================================================
+
+SELECT c.conference_id, c.acronym,
+       COALESCE(a.total, 0) AS total_papers,
+       COALESCE(a.accepted, 0) AS accepted_papers,
+       b.avg_score
+FROM conference c
+LEFT JOIN (SELECT t.conference_id, COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE p.status = :st) AS accepted
+           FROM paper p JOIN track t ON t.track_id = p.track_id
+           GROUP BY t.conference_id) a ON a.conference_id = c.conference_id
+LEFT JOIN (SELECT t.conference_id, ROUND(AVG(rv.overall_score), 2) AS avg_score
+           FROM review rv
+           JOIN paper p ON p.paper_id = rv.paper_id
+           JOIN track t ON t.track_id = p.track_id
+           GROUP BY t.conference_id) b ON b.conference_id = c.conference_id
+ORDER BY c.conference_id
+params: {'st': 'accepted'}
+
+conference_id | acronym | total_papers | accepted_papers | avg_score
+--------------+---------+--------------+-----------------+----------
+1             | CONF-A  | 7            | 4               | 3.36     
+2             | CONF-B  | 6            | 1               | 3.00     
+3             | CONF-C  | 0            | 0               | NULL     
+(3 rows)
+
+===========================================================================
+6.4 Reviewers above average number of reviews
+===========================================================================
+
+WITH cnt AS (
+    SELECT r.reviewer_id, COUNT(rv.review_id) AS reviews
+    FROM reviewer r
+    LEFT JOIN review rv ON rv.reviewer_id = r.reviewer_id
+    GROUP BY r.reviewer_id
+),
+av AS (SELECT AVG(reviews) AS avg_reviews FROM cnt)
+SELECT cnt.reviewer_id, u.given_name || ' ' || u.surname AS full_name,
+       cnt.reviews, ROUND(av.avg_reviews, 2) AS avg_reviews
+FROM cnt
+CROSS JOIN av
+JOIN app_user u ON u.user_id = cnt.reviewer_id
+WHERE cnt.reviews > av.avg_reviews
+ORDER BY cnt.reviews DESC, cnt.reviewer_id
+
+reviewer_id | full_name     | reviews | avg_reviews
+------------+---------------+---------+------------
+4           | Person 4      | 5       | 2.22       
+1           | Arman Armanov | 3       | 2.22       
+3           | Person 3      | 3       | 2.22       
+5           | Person 5      | 3       | 2.22       
+(4 rows)
+
+===========================================================================
+7. Acceptance rate
+===========================================================================
+
+SELECT c.conference_id, c.acronym,
+       COUNT(p.paper_id) FILTER (WHERE p.status = :acc) AS accepted,
+       COUNT(p.paper_id) FILTER (WHERE p.status = :rej) AS rejected,
+       ROUND(100.0 * COUNT(p.paper_id) FILTER (WHERE p.status = :acc)
+             / NULLIF(COUNT(p.paper_id) FILTER (WHERE p.status IN (:acc, :rej)), 0), 2) AS acceptance_rate
+FROM conference c
+LEFT JOIN track t ON t.conference_id = c.conference_id
+LEFT JOIN paper p ON p.track_id = t.track_id
+GROUP BY c.conference_id, c.acronym
+ORDER BY c.conference_id
+params: {'acc': 'accepted', 'rej': 'rejected'}
+
+conference_id | acronym | accepted | rejected | acceptance_rate
+--------------+---------+----------+----------+----------------
+1             | CONF-A  | 4        | 1        | 80.00          
+2             | CONF-B  | 1        | 2        | 33.33          
+3             | CONF-C  | 0        | 0        | NULL           
+(3 rows)
+
+===========================================================================
+8. View accepted_paper_schedule
+===========================================================================
+
+-- create view
+CREATE OR REPLACE VIEW accepted_paper_schedule AS
+SELECT p.paper_id, p.title AS paper_title,
+       c.conference_id, c.acronym,
+       t.name AS track_name,
+       s.session_id, s.title AS session_title, s.session_date,
+       s.start_time, s.end_time, s.room_label,
+       ch.given_name || ' ' || ch.surname AS chair_name,
+       ca.given_name || ' ' || ca.surname AS corresponding_author,
+       ca.email AS corresponding_email
+FROM paper p
+JOIN conference_session s ON s.session_id = p.session_id
+JOIN conference c ON c.conference_id = s.conference_id
+JOIN track t ON t.track_id = p.track_id
+JOIN app_user ch ON ch.user_id = s.chair_id
+LEFT JOIN paper_author pa ON pa.paper_id = p.paper_id AND pa.is_corresponding
+LEFT JOIN app_user ca ON ca.user_id = pa.author_id
+WHERE p.status = 'accepted'
+
+ok
+
+-- it is a view
+SELECT table_name, table_type FROM information_schema.tables WHERE table_name = :t
+params: {'t': 'accepted_paper_schedule'}
+
+table_name              | table_type
+------------------------+-----------
+accepted_paper_schedule | VIEW      
+(1 rows)
+
+-- query view
+SELECT * FROM accepted_paper_schedule
+ORDER BY conference_id, session_date, start_time, session_id, paper_id
+
+paper_id | paper_title | conference_id | acronym | track_name | session_id | session_title | session_date | start_time | end_time | room_label | chair_name    | corresponding_author | corresponding_email      
+---------+-------------+---------------+---------+------------+------------+---------------+--------------+------------+----------+------------+---------------+----------------------+--------------------------
+1        | Paper 1     | 1             | CONF-A  | Track 1    | 1          | Session 1     | 2027-03-16   | 10:00:00   | 11:30:00 | Room 1     | Person 4      | Arman Armanov        | arman.armanov@example.com
+2        | Paper 2     | 1             | CONF-A  | Track 1    | 1          | Session 1     | 2027-03-16   | 10:00:00   | 11:30:00 | Room 1     | Person 4      | Person 8             | person8@example.com      
+3        | Paper 3     | 1             | CONF-A  | Track 2    | 2          | Session 2     | 2027-03-16   | 14:00:00   | 15:30:00 | Room 2     | Arman Armanov | Person 11            | person11@example.com     
+9        | Paper 9     | 2             | CONF-B  | Track 4    | 4          | Session 4     | 2027-04-21   | 09:30:00   | 11:00:00 | Room 4     | Person 6      | Person 6             | person6@example.com      
+(4 rows)
+
+-- accepted papers with no session (not in view)
+SELECT paper_id, title, status, session_id FROM paper WHERE status = :s AND session_id IS NULL
+params: {'s': 'accepted'}
+
+paper_id | title   | status   | session_id
+---------+---------+----------+-----------
+4        | Paper 4 | accepted | NULL      
+(1 rows)

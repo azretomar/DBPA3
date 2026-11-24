@@ -105,10 +105,10 @@ verify_rules.sql checks all of them, on our data all are 0.
 | Track coordinator is in the conference pool | yes, composite FK |
 | Session chair is in the conference pool | yes, composite FK |
 | Exactly one corresponding author | at most one by unique index, at least one by the app |
-| Every user is author or reviewer or both | app |
-| Every paper has at least one author, keyword, version | app |
-| Every author has a research area, every reviewer has an expertise | app |
-| A reviewer only reviews papers of conferences where he is in the pool | app |
+| Every user is author or reviewer or both | only in data |
+| Every paper has at least one author, keyword, version | at least one author by the app, keyword and version only in data |
+| Every author has a research area, every reviewer has an expertise | only in data |
+| A reviewer only reviews papers of conferences where he is in the pool | only in data |
 | Every conference has a host and a track | only in data |
 | Session date is inside the conference dates | only in data |
 | Paper submitted before the submission deadline | only in data |
@@ -200,7 +200,7 @@ Running all tasks recreates the tables and data first (tasks 1 and 2).
 ## Export
 
 ```
-pg_dump -U postgres --no-owner --no-privileges OmarData > OmarData_dump.sql
+pg_dump -U postgres --no-owner --no-privileges OmarData > OmarDBplain.sql
 ```
 
 ---
