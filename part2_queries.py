@@ -1,15 +1,12 @@
 import os
 import sys
 from textwrap import dedent
-
 import sqlalchemy
 from sqlalchemy import create_engine,text
-from sqlalchemy.engine import URL
 
 PASSWORD="postgres"
 
-db_url=URL.create("postgresql+psycopg2",username="postgres",password=PASSWORD,
-                    host="localhost",port=5432,database="OmarData")
+db_url="postgresql+psycopg2://postgres:"+PASSWORD+"@localhost:5432/OmarData"
 if os.environ.get("DATABASE_URL"):
     db_url=os.environ["DATABASE_URL"]
 
@@ -27,45 +24,41 @@ def title(s):
     print("="*75)
 
 def print_rows(cols,rows):
-    data=[["NULL" if v is None else str(v) for v in r] for r in rows]
-    w=[len(c) for c in cols]
-    for r in data:
-        for i in range(len(r)):
-            if len(r[i])>w[i]:
-                w[i]=len(r[i])
-    print(" | ".join(cols[i].ljust(w[i]) for i in range(len(cols))))
-    print("-+-".join("-"*x for x in w))
-    for r in data:
-        print(" | ".join(r[i].ljust(w[i]) for i in range(len(r))))
+    print(" | ".join(cols))
+    for r in rows:
+        values=[]
+        for v in r:
+            if v is None:
+                values.append("NULL")
+            else:
+                values.append(str(v))
+        print(" | ".join(values))
     print("("+str(len(rows))+" rows)")
 
 def run(conn,sql,params=None,label=""):
     sql=dedent(sql).strip()
+    if params is None:
+        params={}
     print()
-    if label:
+    if label!="":
         print("--",label)
     print(sql)
-    if params:
+    if len(params)>0:
         print("params:",params)
     print()
-    res=conn.execute(text(sql),params or {})
+    res=conn.execute(text(sql),params)
     if res.returns_rows:
-        cols=list(res.keys())
-        print_rows(cols,res.fetchall())
-    elif res.rowcount>=0:
-        print("rows affected:",res.rowcount)
+        print_rows(list(res.keys()),res.fetchall())
     else:
-        print("ok")
-    return res
+        print("rows affected:",res.rowcount)
 
 def run_file(name):
-    with open(os.path.join(folder,"sql",name),encoding="utf-8") as f:
-        script=f.read()
+    f=open(os.path.join(folder,"sql",name),encoding="utf-8")
+    script=f.read()
+    f.close()
     print("running sql/"+name)
     with engine.begin() as conn:
         conn.exec_driver_sql(script)
-
-count_all="\nUNION ALL\n".join("SELECT '"+t+"' AS table_name, COUNT(*) AS rows FROM "+t for t in tables)
 
 counts="""
 SELECT (SELECT COUNT(*) FROM app_user) AS users,
@@ -83,34 +76,36 @@ def task1():
     run_file("schema.sql")
     with engine.connect() as conn:
         run(conn,"""
-            SELECT c.relname AS table_name,
-                   COUNT(*) FILTER (WHERE con.contype = 'p') AS pk,
-                   COUNT(*) FILTER (WHERE con.contype = 'f') AS fk,
-                   COUNT(*) FILTER (WHERE con.contype = 'u') AS uniq,
-                   COUNT(*) FILTER (WHERE con.contype = 'c') AS checks
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            LEFT JOIN pg_constraint con ON con.conrelid = c.oid
-            WHERE n.nspname = 'public' AND c.relkind = 'r'
-            GROUP BY c.relname
-            ORDER BY c.relname
-        """,label="tables and constraints")
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+        """,label="created tables")
         run(conn,"""
-            SELECT CAST(conrelid AS regclass) AS table_name, conname, pg_get_constraintdef(oid) AS definition
-            FROM pg_constraint
-            WHERE contype = 'c' AND connamespace = CAST('public' AS regnamespace)
-            ORDER BY 1, 2
+            SELECT table_name, constraint_type, COUNT(*) AS how_many
+            FROM information_schema.table_constraints
+            WHERE table_schema = 'public' AND constraint_name NOT LIKE '%not_null'
+            GROUP BY table_name, constraint_type
+            ORDER BY table_name, constraint_type
+        """,label="constraints of each table")
+        run(conn,"""
+            SELECT constraint_name, check_clause FROM information_schema.check_constraints
+            WHERE constraint_schema = 'public' AND constraint_name NOT LIKE '%not_null'
+            ORDER BY constraint_name
         """,label="check constraints")
         run(conn,"""
             SELECT indexname, indexdef FROM pg_indexes
-            WHERE schemaname = 'public' AND indexname = 'uq_one_corresponding_author'
+            WHERE indexname = 'uq_one_corresponding_author'
         """,label="one corresponding author per paper")
 
 def task2():
     title("2. Insert data")
     run_file("seed.sql")
+    print()
+    print("-- row count of every table")
     with engine.connect() as conn:
-        run(conn,count_all,label="row count of every table")
+        for t in tables:
+            n=conn.execute(text("SELECT COUNT(*) FROM "+t)).scalar()
+            print(t,n)
 
 def task3_1():
     title("3.1 Update phone number of Arman Armanov")
@@ -153,25 +148,15 @@ def task4_1():
     with engine.connect() as conn:
         tr=conn.begin()
         run(conn,amina,{"email":p["email"]},"before: papers of Amina")
-        run(conn,"""
-            SELECT p.paper_id,
-                   (SELECT COUNT(*) FROM paper_author x WHERE x.paper_id = p.paper_id) AS authors,
-                   (SELECT COUNT(*) FROM paper_keyword x WHERE x.paper_id = p.paper_id) AS keywords,
-                   (SELECT COUNT(*) FROM paper_version x WHERE x.paper_id = p.paper_id) AS versions,
-                   (SELECT COUNT(*) FROM review x WHERE x.paper_id = p.paper_id) AS reviews
-            FROM paper p
-            WHERE p.status = :status
-              AND EXISTS (SELECT 1 FROM paper_author pa JOIN app_user u ON u.user_id = pa.author_id
-                          WHERE pa.paper_id = p.paper_id AND pa.is_corresponding AND u.email = :email)
-            ORDER BY p.paper_id
-        """,p,"before: papers that will be deleted and their rows")
         run(conn,counts,label="before: counts")
         run(conn,"""
-            DELETE FROM paper p
-            WHERE p.status = :status
-              AND EXISTS (SELECT 1 FROM paper_author pa JOIN app_user u ON u.user_id = pa.author_id
-                          WHERE pa.paper_id = p.paper_id AND pa.is_corresponding AND u.email = :email)
-            RETURNING p.paper_id, p.title
+            DELETE FROM paper
+            WHERE status = :status
+              AND paper_id IN (SELECT pa.paper_id
+                               FROM paper_author pa
+                               JOIN app_user u ON u.user_id = pa.author_id
+                               WHERE u.email = :email AND pa.is_corresponding)
+            RETURNING paper_id, title
         """,p,"delete (authors, keywords, versions, reviews are deleted by ON DELETE CASCADE)")
         run(conn,amina,{"email":p["email"]},"after: papers of Amina")
         run(conn,counts,label="after: counts")
@@ -192,12 +177,10 @@ def task4_2():
         tr=conn.begin()
         run(conn,q,label="before")
         run(conn,"""
-            DELETE FROM conference_session s
-            USING conference c
-            WHERE c.conference_id = s.conference_id
-              AND c.city = :city
-              AND NOT EXISTS (SELECT 1 FROM paper p WHERE p.session_id = s.session_id)
-            RETURNING s.session_id, s.title
+            DELETE FROM conference_session
+            WHERE conference_id IN (SELECT conference_id FROM conference WHERE city = :city)
+              AND session_id NOT IN (SELECT session_id FROM paper WHERE session_id IS NOT NULL)
+            RETURNING session_id, title
         """,{"city":"Astana"},"delete")
         run(conn,q,label="after")
         run(conn,"SELECT conference_id, acronym, city FROM conference ORDER BY conference_id",
@@ -229,9 +212,9 @@ def task5_2():
     with engine.connect() as conn:
         run(conn,"""
             SELECT paper_id, title FROM paper
-            WHERE abstract ILIKE '%' || :phrase || '%'
+            WHERE abstract ILIKE :pattern
             ORDER BY paper_id
-        """,{"phrase":"machine learning"})
+        """,{"pattern":"%machine learning%"})
 
 def task5_3():
     title("5.3 Versions of a paper")
@@ -250,11 +233,11 @@ def task5_4():
             SELECT u.user_id, u.given_name || ' ' || u.surname AS full_name, u.email
             FROM conference_reviewer cr
             JOIN reviewer r ON r.reviewer_id = cr.reviewer_id
+            JOIN reviewer_expertise e ON e.reviewer_id = r.reviewer_id
             JOIN app_user u ON u.user_id = r.reviewer_id
             WHERE cr.conference_id = :conf
               AND r.years_experience >= :years
-              AND EXISTS (SELECT 1 FROM reviewer_expertise e
-                          WHERE e.reviewer_id = r.reviewer_id AND e.area_label = :area)
+              AND e.area_label = :area
             ORDER BY u.user_id
         """,{"conf":1,"years":3,"area":"Databases"})
 
@@ -296,8 +279,9 @@ def task6_3():
                    b.avg_score
             FROM conference c
             LEFT JOIN (SELECT t.conference_id, COUNT(*) AS total,
-                              COUNT(*) FILTER (WHERE p.status = :st) AS accepted
-                       FROM paper p JOIN track t ON t.track_id = p.track_id
+                              SUM(CASE WHEN p.status = :st THEN 1 ELSE 0 END) AS accepted
+                       FROM paper p
+                       JOIN track t ON t.track_id = p.track_id
                        GROUP BY t.conference_id) a ON a.conference_id = c.conference_id
             LEFT JOIN (SELECT t.conference_id, ROUND(AVG(rv.overall_score), 2) AS avg_score
                        FROM review rv
@@ -316,14 +300,13 @@ def task6_4():
                 FROM reviewer r
                 LEFT JOIN review rv ON rv.reviewer_id = r.reviewer_id
                 GROUP BY r.reviewer_id
-            ),
-            av AS (SELECT AVG(reviews) AS avg_reviews FROM cnt)
+            )
             SELECT cnt.reviewer_id, u.given_name || ' ' || u.surname AS full_name,
-                   cnt.reviews, ROUND(av.avg_reviews, 2) AS avg_reviews
+                   cnt.reviews,
+                   ROUND((SELECT AVG(reviews) FROM cnt), 2) AS avg_reviews
             FROM cnt
-            CROSS JOIN av
             JOIN app_user u ON u.user_id = cnt.reviewer_id
-            WHERE cnt.reviews > av.avg_reviews
+            WHERE cnt.reviews > (SELECT AVG(reviews) FROM cnt)
             ORDER BY cnt.reviews DESC, cnt.reviewer_id
         """)
 
@@ -332,10 +315,11 @@ def task7():
     with engine.connect() as conn:
         run(conn,"""
             SELECT c.conference_id, c.acronym,
-                   COUNT(p.paper_id) FILTER (WHERE p.status = :acc) AS accepted,
-                   COUNT(p.paper_id) FILTER (WHERE p.status = :rej) AS rejected,
-                   ROUND(100.0 * COUNT(p.paper_id) FILTER (WHERE p.status = :acc)
-                         / NULLIF(COUNT(p.paper_id) FILTER (WHERE p.status IN (:acc, :rej)), 0), 2) AS acceptance_rate
+                   SUM(CASE WHEN p.status = :acc THEN 1 ELSE 0 END) AS accepted,
+                   SUM(CASE WHEN p.status = :rej THEN 1 ELSE 0 END) AS rejected,
+                   ROUND(100.0 * SUM(CASE WHEN p.status = :acc THEN 1 ELSE 0 END)
+                         / NULLIF(SUM(CASE WHEN p.status = :acc OR p.status = :rej THEN 1 ELSE 0 END), 0), 2)
+                         AS acceptance_rate
             FROM conference c
             LEFT JOIN track t ON t.conference_id = c.conference_id
             LEFT JOIN paper p ON p.track_id = t.track_id
@@ -385,7 +369,10 @@ tasks={
 }
 
 if __name__=="__main__":
-    todo=sys.argv[1:] if len(sys.argv)>1 else list(tasks.keys())
+    if len(sys.argv)>1:
+        todo=sys.argv[1:]
+    else:
+        todo=list(tasks.keys())
     for t in todo:
         if t not in tasks:
             print("no task",t)
