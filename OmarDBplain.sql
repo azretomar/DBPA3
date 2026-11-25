@@ -1,11 +1,4 @@
---
--- PostgreSQL database dump
---
-
 \restrict Oedad9Cq57iKw2YVrp3FOpU8U6bwFYeJOAmK4ttTkNerYftjSWiP3l3IzCMZWWK
-
--- Dumped from database version 18.7 (3190d2f)
--- Dumped by pg_dump version 18.7
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
